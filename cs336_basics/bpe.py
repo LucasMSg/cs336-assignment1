@@ -2,7 +2,7 @@ import os
 import regex as re
 from typing import BinaryIO, Dict, List, Tuple
 from multiprocessing import Pool
-from collections import Counter
+from collections import Counter, defaultdict
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -88,6 +88,7 @@ def count_pairs(word_counts):
             pairs[(a, b)] += freq
     return pairs
 
+# NEED TO AVOID EXECUTING APPLY MERGE FOR ALL WORDS
 def apply_merge(word, pair, new_token):
     out = []
     i = 0
@@ -140,26 +141,47 @@ def train_bpe(
         for c in p.starmap(pretokenize, items):
             counterTotal.update(c)
     
-    #print(counterTotal)
+    words = [w for w in counterTotal]           # tuples of bytes
+    freqs = [counterTotal[w] for w in words] 
+    
+    # Count pairs ONCE, and index which words contain each pair
+    pair_counts = Counter()
+    pair_to_words = defaultdict(set)
+    
+    
+    for idx, (word, freq) in enumerate(zip(words, freqs)):
+        for pair in zip(word, word[1:]):
+            pair_counts[pair] += freq
+            pair_to_words[pair].add(idx)
     
     
     merges = []
     
-    while len(vocabulary) < vocab_size:
-        # go through every token and record the pairs
-        pairs = count_pairs(counterTotal)
-        if not pairs:
-            break
-        best = max(pairs, key=lambda p: (pairs[p], p))
-        new_token = best[0] + best[1]          # b' ' + b't' -> b' t'
-        
+    while len(vocabulary) < vocab_size and pair_counts:
+        best = max(pair_counts, key=lambda p: (pair_counts[p], p))
+        new_token = best[0] + best[1]
         merges.append(best)
-        vocabulary[len(vocabulary)] = new_token 
-        
-        #  calculate new counter
-        new_counter = Counter()
-        for word, freq in counterTotal.items():
-            new_counter[apply_merge(word, best, new_token)] += freq
-        counterTotal = new_counter
-                
-    return vocabulary,merges
+        vocabulary[len(vocabulary)] = new_token
+
+        # Only touch words that actually contain tokens merged
+        for idx in list(pair_to_words.pop(best, ())):
+            word, freq = words[idx], freqs[idx]
+
+            # 1. remove this word's old pairs
+            for pair in zip(word, word[1:]):
+                pair_counts[pair] -= freq
+                if pair_counts[pair] <= 0:
+                    del pair_counts[pair]
+                if pair in pair_to_words:
+                    pair_to_words[pair].discard(idx)
+
+            # 2. merge inside this word only
+            new_word = apply_merge(word, best, new_token)
+            words[idx] = new_word
+
+            # 3. add its new pairs
+            for pair in zip(new_word, new_word[1:]):
+                pair_counts[pair] += freq
+                pair_to_words[pair].add(idx)
+
+    return vocabulary, merges
